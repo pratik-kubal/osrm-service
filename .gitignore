@@ -427,3 +427,9 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# OSM data — downloaded and preprocessed at runtime, never committed
+*.osm.pbf
+*.osrm
+*.osrm.*
+.DS_store
