@@ -1,69 +1,48 @@
-# fly.toml — generic OSRM routing service
-# See CLAUDE.md for full deployment instructions
-# ---------------------------------------------------------------------------
+# fly.toml app configuration file generated for porchfest-nav on 2026-05-11T09:59:45-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app            = "osrm-fly"       # replace with your app name after fly launch
-primary_region = "ewr"            # change to your nearest Fly region
+app = 'porchfest-nav'
+primary_region = 'ewr'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
-# ---------------------------------------------------------------------------
-# Non-secret env vars — safe to commit
-# OSM_REGION_URL must be set via: fly secrets set OSM_REGION_URL=<url>
-# ---------------------------------------------------------------------------
 [env]
-  OSM_REGION_NAME = "region"         # short name used for local filenames
-  OSRM_PROFILES   = "foot,car,bike"  # comma-separated: foot | car | bike
-                                     # use fewer profiles to reduce RAM + build time
-                                     # e.g. "foot" for a walkable event like Porchfest
+  OSM_REGION_NAME = 'region'
+  OSRM_PROFILES = 'foot,bike'
+  OSM_BBOX = '-75.2501227279,39.9311022072,-75.1754357155,39.9720779568'
 
-# ---------------------------------------------------------------------------
-# HTTP service — nginx on 8080 routes to per-profile OSRM instances
-#   /route/v1/foot/*    or /route/v1/walking/*  → foot instance (:5000)
-#   /route/v1/driving/*                         → car  instance (:5001)
-#   /route/v1/cycling/* or /route/v1/bike/*     → bike instance (:5002)
-# ---------------------------------------------------------------------------
+[[mounts]]
+  source = 'osrm_data'
+  destination = '/data'
+
 [[services]]
+  protocol = 'tcp'
   internal_port = 8080
-  protocol      = "tcp"
 
   [[services.ports]]
-    port     = 80
-    handlers = ["http"]
+    port = 80
+    handlers = ['http']
 
   [[services.ports]]
-    port     = 443
-    handlers = ["tls", "http"]
+    port = 443
+    handlers = ['tls', 'http']
 
   [services.concurrency]
-    type       = "requests"
+    type = 'requests'
     hard_limit = 300
     soft_limit = 200
 
   [[services.http_checks]]
-    interval     = "30s"
-    timeout      = "10s"
-    grace_period = "180s"    # extra time: 3 profiles need longer to build + load
-    method       = "GET"
-    path         = "/health" # nginx returns 200 when ready
+    interval = '30s'
+    timeout = '10s'
+    grace_period = '3m0s'
+    method = 'GET'
+    path = '/health'
 
-# ---------------------------------------------------------------------------
-# Persistent volume — preprocessed OSM data survives restarts
-# Create with: fly volumes create osrm_data --size 10 --region <region>
-# Size 10GB to comfortably hold 3 profiles of a mid-sized region
-# ---------------------------------------------------------------------------
-[[mounts]]
-  source      = "osrm_data"
-  destination = "/data"
-
-# ---------------------------------------------------------------------------
-# VM sizing for 3 profiles
-# Each profile adds ~500MB–1GB RAM depending on region size
-# Philadelphia all 3 profiles: ~2–3GB total RAM needed
-# Scale up with: fly scale vm shared-cpu-4x --memory 4096
-# ---------------------------------------------------------------------------
-[vm]
-  cpu_kind  = "shared"
-  cpus      = 2
-  memory_mb = 4096
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 512

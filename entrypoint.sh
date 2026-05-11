@@ -31,19 +31,45 @@ declare -A PROFILE_PORT=(
   [bike]=5002
 )
 
+# OSRM ships profiles in /opt with these filenames; map our short name → lua file
+declare -A PROFILE_LUA=(
+  [foot]=foot
+  [car]=car
+  [bike]=bicycle
+)
+
 # ---------------------------------------------------------------------------
 # 1. Download OSM data (once — reuses file on subsequent boots)
 # ---------------------------------------------------------------------------
-if [ ! -f "$OSM_FILE" ]; then
+if [ ! -s "$OSM_FILE" ]; then
   if [ -z "$OSM_REGION_URL" ]; then
     echo "[osrm] ERROR: OSM_REGION_URL is not set."
     echo "  Set it with: fly secrets set OSM_REGION_URL=<geofabrik-url>"
     exit 1
   fi
+  [ -f "$OSM_FILE" ] && echo "[osrm] Removing zero-byte $OSM_FILE from a prior failed run." && rm -f "$OSM_FILE"
   echo "[osrm] Downloading: $OSM_REGION_URL"
   wget -q --show-progress -O "$OSM_FILE" "$OSM_REGION_URL"
 else
   echo "[osrm] OSM source file found — skipping download."
+fi
+
+# ---------------------------------------------------------------------------
+# 1b. Optional bbox clip (once — reuses clipped file on subsequent boots)
+#     OSM_BBOX format: min_lng,min_lat,max_lng,max_lat
+# ---------------------------------------------------------------------------
+if [ -n "${OSM_BBOX:-}" ]; then
+  CLIPPED_FILE="/data/${REGION_NAME}-clipped.osm.pbf"
+  if [ ! -s "$CLIPPED_FILE" ]; then
+    [ -f "$CLIPPED_FILE" ] && echo "[osrm] Removing zero-byte $CLIPPED_FILE from a prior failed clip." && rm -f "$CLIPPED_FILE"
+    echo "[osrm] Clipping $OSM_FILE to bbox: $OSM_BBOX"
+    osmium extract --overwrite --bbox "$OSM_BBOX" --strategy complete_ways \
+      --output "$CLIPPED_FILE" "$OSM_FILE"
+    echo "[osrm] Clipped file: $(du -h "$CLIPPED_FILE" | cut -f1)"
+  else
+    echo "[osrm] Clipped file found — skipping clip."
+  fi
+  OSM_FILE="$CLIPPED_FILE"
 fi
 
 # ---------------------------------------------------------------------------
@@ -57,7 +83,7 @@ for PROFILE in "${PROFILE_LIST[@]}"; do
 
   if [ ! -f "${OSRM_BASE}" ]; then
     echo "[osrm] Building profile: $PROFILE"
-    osrm-extract -p "/opt/${PROFILE}.lua" "$OSM_FILE" --output "${OSRM_BASE}"
+    osrm-extract -p "/opt/${PROFILE_LUA[$PROFILE]}.lua" "$OSM_FILE" --output "${OSRM_BASE}"
     osrm-partition "${OSRM_BASE}"
     osrm-customize "${OSRM_BASE}"
     echo "[osrm] Profile $PROFILE ready."
@@ -69,7 +95,7 @@ done
 # ---------------------------------------------------------------------------
 # 3. Generate supervisord config — one [program] block per profile
 # ---------------------------------------------------------------------------
-SUPERVISORD_CONF="/etc/supervisor/conf.d/osrm.conf"
+SUPERVISORD_CONF="/etc/supervisord.conf"
 
 cat > "$SUPERVISORD_CONF" <<EOF
 [supervisord]
@@ -117,7 +143,32 @@ EOF
 # ---------------------------------------------------------------------------
 # 4. Generate nginx config — routes by OSRM profile in URL path
 # ---------------------------------------------------------------------------
-NGINX_CONF="/etc/nginx/sites-enabled/default"
+NGINX_CONF="/etc/nginx/http.d/osrm.conf"
+CORS_SNIPPET="/etc/nginx/snippets/cors.conf"
+
+mkdir -p /etc/nginx/snippets
+
+# OSRM emits its own CORS headers on GET but doesn't answer OPTIONS preflights.
+# Strip its headers so we don't get duplicates (which browsers reject), then
+# emit one clean set from nginx and short-circuit OPTIONS here.
+cat > "$CORS_SNIPPET" <<'CORSEOF'
+proxy_hide_header Access-Control-Allow-Origin;
+proxy_hide_header Access-Control-Allow-Methods;
+proxy_hide_header Access-Control-Allow-Headers;
+proxy_hide_header Access-Control-Max-Age;
+
+if ($request_method = OPTIONS) {
+    add_header Access-Control-Allow-Origin "*";
+    add_header Access-Control-Allow-Methods "GET, OPTIONS";
+    add_header Access-Control-Max-Age 86400;
+    add_header Content-Type "text/plain";
+    add_header Content-Length 0;
+    return 204;
+}
+add_header Access-Control-Allow-Origin "*" always;
+add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+add_header Access-Control-Max-Age 86400 always;
+CORSEOF
 
 cat > "$NGINX_CONF" <<'NGINXEOF'
 server {
@@ -141,9 +192,9 @@ for PROFILE in "${PROFILE_LIST[@]}"; do
       cat >> "$NGINX_CONF" <<EOF
     # foot profile — matches /route/v1/foot/* and /route/v1/walking/*
     location ~ ^/(route|table|trip|match|nearest)/v1/(foot|walking) {
+        include ${CORS_SNIPPET};
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
-        add_header Access-Control-Allow-Origin *;
     }
 EOF
       ;;
@@ -151,9 +202,9 @@ EOF
       cat >> "$NGINX_CONF" <<EOF
     # car profile — matches /route/v1/driving/*
     location ~ ^/(route|table|trip|match|nearest)/v1/driving {
+        include ${CORS_SNIPPET};
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
-        add_header Access-Control-Allow-Origin *;
     }
 EOF
       ;;
@@ -161,9 +212,9 @@ EOF
       cat >> "$NGINX_CONF" <<EOF
     # bike profile — matches /route/v1/cycling/* and /route/v1/bike/*
     location ~ ^/(route|table|trip|match|nearest)/v1/(cycling|bike) {
+        include ${CORS_SNIPPET};
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
-        add_header Access-Control-Allow-Origin *;
     }
 EOF
       ;;
@@ -178,4 +229,4 @@ echo "}" >> "$NGINX_CONF"
 echo "[osrm] Active profiles: $PROFILES"
 echo "[osrm] nginx routing on port 8080 → OSRM instances"
 echo "[osrm] Starting supervisord..."
-exec supervisord -c /etc/supervisor/supervisord.conf
+exec supervisord -c /etc/supervisord.conf
