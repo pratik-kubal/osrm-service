@@ -145,6 +145,7 @@ EOF
 # ---------------------------------------------------------------------------
 NGINX_CONF="/etc/nginx/http.d/osrm.conf"
 CORS_SNIPPET="/etc/nginx/snippets/cors.conf"
+PROXY_SNIPPET="/etc/nginx/snippets/proxy-common.conf"
 
 mkdir -p /etc/nginx/snippets
 
@@ -170,7 +171,19 @@ add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
 add_header Access-Control-Max-Age 86400 always;
 CORSEOF
 
+# Shared snippet for every proxied OSRM location: per-IP rate limit + upstream timeouts.
+cat > "$PROXY_SNIPPET" <<'PROXYEOF'
+limit_req zone=osrm_limit burst=20 nodelay;
+limit_req_status 429;
+proxy_connect_timeout 2s;
+proxy_read_timeout 5s;
+proxy_send_timeout 5s;
+PROXYEOF
+
 cat > "$NGINX_CONF" <<'NGINXEOF'
+# 10 req/s per client IP; 10MB zone tracks ~160k unique IPs before eviction.
+limit_req_zone $binary_remote_addr zone=osrm_limit:10m rate=10r/s;
+
 server {
     listen 8080;
     server_name _;
@@ -193,6 +206,7 @@ for PROFILE in "${PROFILE_LIST[@]}"; do
     # foot profile — matches /route/v1/foot/* and /route/v1/walking/*
     location ~ ^/(route|table|trip|match|nearest)/v1/(foot|walking) {
         include ${CORS_SNIPPET};
+        include ${PROXY_SNIPPET};
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
     }
@@ -203,6 +217,7 @@ EOF
     # car profile — matches /route/v1/driving/*
     location ~ ^/(route|table|trip|match|nearest)/v1/driving {
         include ${CORS_SNIPPET};
+        include ${PROXY_SNIPPET};
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
     }
@@ -213,6 +228,7 @@ EOF
     # bike profile — matches /route/v1/cycling/* and /route/v1/bike/*
     location ~ ^/(route|table|trip|match|nearest)/v1/(cycling|bike) {
         include ${CORS_SNIPPET};
+        include ${PROXY_SNIPPET};
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
     }
